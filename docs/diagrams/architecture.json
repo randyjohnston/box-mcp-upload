@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Box upload architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      720
+    ]
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "Browser workbench",
+      "sublabel": "Queue \u00b7 hashes \u00b7 request trace",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        240,
+        80
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Next.js API",
+      "sublabel": "Origin checks \u00b7 session ownership",
+      "pos": [
+        420,
+        300
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "App MCP tools",
+      "sublabel": "Run in the Next.js process",
+      "pos": [
+        830,
+        300
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "sessions",
+      "type": "security",
+      "label": "Session + OAuth state",
+      "sublabel": "PKCE \u00b7 token renewal \u00b7 app credentials",
+      "pos": [
+        420,
+        70
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "oauth",
+      "type": "external",
+      "label": "Box OAuth",
+      "sublabel": "MCP / Platform OAuth / CCG",
+      "pos": [
+        830,
+        70
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "staging",
+      "type": "database",
+      "label": "Temporary upload files",
+      "sublabel": "On this server \u00b7 deleted after upload",
+      "pos": [
+        30,
+        560
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "platform",
+      "type": "external",
+      "label": "Box Platform API",
+      "sublabel": "Folders \u00b7 scoped token \u00b7 chunk commit",
+      "pos": [
+        830,
+        560
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "hosted",
+      "type": "external",
+      "label": "Box-hosted MCP",
+      "sublabel": "Inline text / validated upload ticket",
+      "pos": [
+        420,
+        560
+      ],
+      "size": [
+        260,
+        80
+      ]
+    },
+    {
+      "id": "upload-host",
+      "type": "external",
+      "label": "Box upload hosts",
+      "sublabel": "Scoped token / upload ticket only",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        240,
+        80
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "control",
+      "from": "browser",
+      "to": "api",
+      "label": "HTTPS control",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch",
+      "from": "api",
+      "to": "tools",
+      "label": "MCP calls",
+      "variant": "emphasis"
+    },
+    {
+      "id": "authenticate",
+      "from": "api",
+      "to": "sessions",
+      "label": "Validate session"
+    },
+    {
+      "id": "grants",
+      "from": "sessions",
+      "to": "oauth",
+      "label": "Token grants",
+      "variant": "security"
+    },
+    {
+      "id": "stage",
+      "from": "browser",
+      "to": "staging",
+      "label": "Bytes if allowed",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 110
+    },
+    {
+      "id": "hosted-call",
+      "from": "tools",
+      "to": "hosted",
+      "label": "MCP credential"
+    },
+    {
+      "id": "platform-call",
+      "from": "tools",
+      "to": "platform",
+      "label": "Platform credential",
+      "labelDy": 24
+    },
+    {
+      "id": "direct-bytes",
+      "from": "browser",
+      "to": "upload-host",
+      "label": "Direct file bytes",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Direct bytes",
+      "items": [
+        "Browser \u2192 Box upload host with a scoped token or upload ticket.",
+        "Platform: simple below 20 MiB; chunked above, three workers."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Fallback workflow",
+      "items": [
+        "401/403 or safely aborted chunks \u2192 next connected credential; account/root may change.",
+        "No browser route \u2192 server if enabled. Uncertain writes or failed aborts \u2192 stop."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Server bytes",
+      "items": [
+        "Server uploads first save browser bytes to a temporary file on this server.",
+        "The app uploads it to Box, then deletes it; direct uploads skip this step."
+      ]
+    }
+  ]
+}

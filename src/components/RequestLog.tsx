@@ -62,7 +62,7 @@ export default function RequestLog({
         <div className="table-scroll">
           <table className="activity-table">
             <caption className="visually-hidden">
-              Individual network requests and transport decisions
+              Each request, its destination and the route used
             </caption>
             <thead>
               <tr>

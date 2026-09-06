@@ -25,7 +25,5 @@ if (!process.env.BOX_CCG_CLIENT_ID || !process.env.BOX_CCG_CLIENT_SECRET) {
   );
 }
 boxConfig("ccg"); // fail fast with a specific message when the rest is incomplete
-const server = createBoxServer(
-  new BoxClient(tokenProvider(undefined, "ccg")),
-);
+const server = createBoxServer(new BoxClient(tokenProvider(undefined, "ccg")));
 await server.connect(new StdioServerTransport());

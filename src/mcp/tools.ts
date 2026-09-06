@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BoxClient } from "../box/client";
-import { listFolder, resolveFolder, whoAmI } from "../box/folders";
+import {
+  assertSafeName,
+  listFolder,
+  resolveFolder,
+  whoAmI,
+} from "../box/folders";
 import { uploadFile, type UploadProgress } from "../box/upload";
 import { claimUpload, discardUpload } from "../staging";
 import { prepareDirect, finishDirect } from "../box/direct";
@@ -17,6 +22,7 @@ import {
   hostedUploadUrl,
   hostedWhoAmI,
   isSmallText,
+  decodeInlineText,
 } from "./hosted";
 import { AUTH_APP_LABEL } from "../box/config";
 import { readFile } from "node:fs/promises";
@@ -59,10 +65,7 @@ export function createBoxServer(
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    () =>
-      reply(() =>
-        viaHostedMcp ? hostedWhoAmI(auth!) : whoAmI(client),
-      ),
+    () => reply(() => (viaHostedMcp ? hostedWhoAmI(auth!) : whoAmI(client))),
   );
   server.registerTool(
     "box_list_folder",
@@ -122,10 +125,13 @@ export function createBoxServer(
               folderId,
               meta.fileName,
             );
-            if (isSmallText(meta.fileName, meta.size)) {
+            const text = isSmallText(meta.fileName, meta.size)
+              ? decodeInlineText(await readFile(filePath))
+              : undefined;
+            if (text !== undefined) {
               const uploaded = await hostedUploadText(auth!, {
                 fileName: meta.fileName,
-                content: await readFile(filePath, "utf8"),
+                content: text,
                 parentFolderId: folderId,
                 fileId: existing?.id,
               });
@@ -133,7 +139,9 @@ export function createBoxServer(
                 id: uploaded.file_id,
                 name: uploaded.file_name ?? meta.fileName,
                 size: meta.size,
-                strategy: existing ? "mcp upload_file_version" : "mcp upload_file",
+                strategy: existing
+                  ? "mcp upload_file_version"
+                  : "mcp upload_file",
                 newVersion: Boolean(existing),
                 folderId,
               };
@@ -147,7 +155,6 @@ export function createBoxServer(
             const entry = await hostedPostBytes({
               uploadUrl: ticket.upload_url,
               uploadToken: ticket.upload_token,
-              fallbackToken: await auth!.getAccessToken(),
               fileName: meta.fileName,
               parentFolderId: existing ? undefined : folderId,
               bytes: new Uint8Array(await readFile(filePath)),
@@ -208,6 +215,7 @@ export function createBoxServer(
       },
       ({ name, size, folder }) =>
         reply(async () => {
+          name = assertSafeName(name, "file");
           if (!viaHostedMcp)
             return prepareDirect(client, auth, owner, name, size, folder, app);
           // Box's MCP surface has no upload session: get_upload_url returns a
@@ -240,7 +248,7 @@ export function createBoxServer(
           return {
             strategy: "simple" as const,
             uploadUrl: ticket.upload_url,
-            token: ticket.upload_token ?? (await auth!.getAccessToken()),
+            token: ticket.upload_token,
             folderId: existing ? "" : folderId,
             name,
             size,

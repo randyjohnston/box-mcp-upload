@@ -57,33 +57,14 @@ export function preferredOAuthApp(): OAuthApp {
   return oauthAppConfigured("mcp") ? "mcp" : "platform";
 }
 
-export const otherOAuthApp = (app: OAuthApp): OAuthApp =>
-  app === "mcp" ? "platform" : "mcp";
-
-/** The preferred app, or the other one when the preferred is not configured. */
-export function activeOAuthApp(): OAuthApp {
-  const preferred = preferredOAuthApp();
-  if (oauthAppConfigured(preferred)) return preferred;
-  // Fall through to the configured alternative; if neither is set, keep the
-  // preferred one so boxConfig reports which credentials are missing.
-  return oauthAppConfigured(otherOAuthApp(preferred))
-    ? otherOAuthApp(preferred)
-    : preferred;
-}
-
-/** The app to retry with when `app` cannot reach Box from the browser. */
-export function fallbackOAuthApp(app: OAuthApp): OAuthApp | undefined {
-  return oauthAppConfigured(otherOAuthApp(app))
-    ? otherOAuthApp(app)
-    : undefined;
-}
-
 export function boxConfig(app: AuthApp = defaultAuthApp()) {
   const selected = app === "ccg" ? undefined : app;
   const credentials = selected ? oauthCredentials(selected) : undefined;
   const parsed = schema.safeParse({
     ...process.env,
-    clientId: credentials ? credentials.clientId : process.env.BOX_CCG_CLIENT_ID,
+    clientId: credentials
+      ? credentials.clientId
+      : process.env.BOX_CCG_CLIENT_ID,
     clientSecret: credentials
       ? credentials.clientSecret
       : process.env.BOX_CCG_CLIENT_SECRET,
@@ -97,7 +78,7 @@ export function boxConfig(app: AuthApp = defaultAuthApp()) {
   // A user id means "act as that user"; otherwise the token is the
   // enterprise's own service account.
   const subjectType = env.BOX_CCG_USER_ID ? "user" : "enterprise";
-  const subjectId = env.BOX_CCG_USER_ID ?? env.BOX_CCG_ENTERPRISE_ID;
+  const subjectId = env.BOX_CCG_USER_ID || env.BOX_CCG_ENTERPRISE_ID;
   if (mode === "ccg" && !/^\d+$/.test(subjectId ?? "")) {
     throw new Error(
       "Invalid configuration: CCG requires BOX_CCG_ENTERPRISE_ID, or BOX_CCG_USER_ID to act as one user.",
@@ -158,6 +139,7 @@ export function boxEndpoints() {
       token: `${url.origin}/oauth2/token`,
       authorize: `${url.origin}/authorize`,
       revoke: `${url.origin}/oauth2/revoke`,
+      mcp: `${url.origin}/mcp`,
     };
   }
   return {
@@ -166,5 +148,6 @@ export function boxEndpoints() {
     token: "https://api.box.com/oauth2/token",
     authorize: "https://account.box.com/api/oauth2/authorize",
     revoke: "https://api.box.com/oauth2/revoke",
+    mcp: "https://mcp.box.com",
   };
 }

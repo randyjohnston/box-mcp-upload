@@ -78,7 +78,8 @@ export async function tracedFetch(
       durationMs: Math.round(performance.now() - started),
       transport,
       credential,
-      reason: reason ?? describe(step ?? active?.step ?? "box", response?.status),
+      reason:
+        reason ?? describe(step ?? active?.step ?? "box", response?.status),
     };
     if (active && active.requests.length < 300) {
       active.requests.push(event);

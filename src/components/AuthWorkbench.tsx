@@ -2,14 +2,15 @@
 import { useState } from "react";
 import type { RequestEvent } from "../request-event";
 
-export type OAuthApp = "mcp" | "platform";
-export type AuthApp = OAuthApp | "ccg";
+import { AUTH_APP_LABEL, type OAuthApp, type AuthApp } from "../box/config";
+export type { OAuthApp, AuthApp } from "../box/config";
 export type AppState = {
   app: AuthApp;
   configured: boolean;
   connected: boolean;
   role?: "primary" | "fallback";
   clientId?: string;
+  rootFolderId?: string;
   identity?: { id: string; name: string; login: string };
 };
 export type SessionInfo = {
@@ -32,11 +33,7 @@ export type SessionInfo = {
   };
   authEvents?: RequestEvent[];
 };
-export const APP_LABEL: Record<AuthApp, string> = {
-  mcp: "MCP integration",
-  platform: "Platform OAuth",
-  ccg: "Platform CCG",
-};
+export const APP_LABEL = AUTH_APP_LABEL;
 type Tool = { name: string; description?: string; inputSchema?: unknown };
 
 /**
@@ -85,8 +82,9 @@ export default function AuthWorkbench({
   // An explicit pick always wins, so a connected flow can be swapped for the
   // other one. Otherwise show whichever is connected, else the first usable.
   const chosenFlow =
-    platformFlows.find((entry) => entry.app === platformFlow && entry.configured)
-      ?.app ??
+    platformFlows.find(
+      (entry) => entry.app === platformFlow && entry.configured,
+    )?.app ??
     platformFlows.find((entry) => entry.connected)?.app ??
     platformFlows.find((entry) => entry.configured)?.app;
   const needsPassword = chosenFlow === "ccg" && session?.ccg.passwordRequired;
@@ -108,16 +106,14 @@ export default function AuthWorkbench({
         </span>
       </div>
       <p className="workbench-help">
-        Separate Box registrations, with separate CORS rules and scopes.
-        Box can refuse one registration and allow the other.
+        Separate Box registrations, with separate CORS rules and scopes. Box can
+        refuse one registration and allow the other.
       </p>
       <ol className="policy-rules">
+        <li>The browser uploads to Box, using the MCP integration first.</li>
         <li>
-          The browser uploads to Box, using the MCP integration first.
-        </li>
-        <li>
-          If Box refuses that credential (<code>401</code>/<code>403</code>),
-          or the browser cannot reach Box, the browser retries with the next
+          If Box refuses that credential (<code>401</code>/<code>403</code>), or
+          the browser cannot reach Box, the browser retries with the next
           connected credential.
         </li>
         <li>

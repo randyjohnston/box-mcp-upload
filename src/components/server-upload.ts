@@ -42,7 +42,7 @@ export function stageFile(
     };
     xhr.onload = () => {
       log({
-        step: "stage file (Next.js server)",
+        step: "save temporary file (Next.js server)",
         method: "POST",
         target: "/api/uploads",
         status: xhr.status,
@@ -64,7 +64,7 @@ export function stageFile(
     };
     xhr.onerror = () => {
       log({
-        step: "stage file (Next.js server)",
+        step: "save temporary file (Next.js server)",
         method: "POST",
         target: "/api/uploads",
         status: "network",
@@ -127,8 +127,8 @@ export async function commitFile(
         }
         if (event === "error") {
           log({
-            step: "Local MCP tool result",
-            transport: "Next.js server → local MCP",
+            step: "App MCP tool result",
+            transport: "Next.js server → in-process MCP",
             method: "MCP",
             target: "box_upload_file",
             status: "failed",
@@ -139,8 +139,8 @@ export async function commitFile(
         }
         if (event === "done") {
           log({
-            step: "Local MCP tool result",
-            transport: "Next.js server → local MCP",
+            step: "App MCP tool result",
+            transport: "Next.js server → in-process MCP",
             method: "MCP",
             target: "box_upload_file",
             status: "done",

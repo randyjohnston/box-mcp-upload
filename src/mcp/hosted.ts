@@ -2,10 +2,11 @@ import { HttpError } from "../errors";
 import { tracedFetch } from "../telemetry";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { AUTH_APP_LABEL } from "../box/config";
+import { AUTH_APP_LABEL, boxEndpoints } from "../box/config";
+import { assertTrustedBoxTarget } from "../box/client";
+import { assertSafeName } from "../box/folders";
+import { z } from "zod";
 import type { TokenProvider } from "../box/auth";
-
-const HOSTED_MCP = "https://mcp.box.com";
 
 /**
  * Box's own MCP server.
@@ -59,16 +60,30 @@ export type BoxEntry = {
  * `{entries:[{type,…}]}`, while `search_folders_by_name` returns a bare array
  * of `{entryType,…}`. Normalise both before anything downstream reads them.
  */
+const entrySchema = z
+  .object({
+    type: z.string().optional(),
+    entryType: z.string().optional(),
+    id: z.string().min(1),
+    name: z.string(),
+    size: z.number().nonnegative().optional(),
+    modified_at: z.string().optional(),
+  })
+  .transform(({ entryType, ...entry }) => ({
+    ...entry,
+    type: entry.type ?? entryType ?? "",
+  }));
+const pageSchema = z.object({
+  entries: z.array(entrySchema),
+  total_count: z.number().int().nonnegative().optional(),
+  offset: z.number().int().nonnegative().optional(),
+  limit: z.number().int().positive().optional(),
+  next_marker: z.string().nullish(),
+});
 function entriesOf(value: unknown): BoxEntry[] {
-  const raw = Array.isArray(value)
-    ? value
-    : Array.isArray((value as { entries?: unknown })?.entries)
-      ? ((value as { entries: unknown[] }).entries as unknown[])
-      : [];
-  return raw.map((item) => {
-    const entry = item as BoxEntry & { entryType?: string };
-    return { ...entry, type: entry.type ?? entry.entryType ?? "" };
-  });
+  return Array.isArray(value)
+    ? z.array(entrySchema).parse(value)
+    : pageSchema.parse(value).entries;
 }
 
 /** What each Box MCP tool is being called to accomplish. */
@@ -79,8 +94,7 @@ const TOOL_PURPOSE: Record<string, string> = {
   create_folder: "create the destination folder because it does not exist yet",
   list_folder_content_by_folder_id:
     "read the destination folder: its contents, and whether the file already exists",
-  get_upload_url:
-    "obtain a single-use URL and token to POST the file bytes to",
+  get_upload_url: "obtain a single-use URL and token to POST the file bytes to",
   upload_file: "upload a small text file inline, in this one call",
   upload_file_version:
     "replace an existing file's contents inline, in this one call",
@@ -101,9 +115,10 @@ function purpose(method: string, tool?: string): string {
 
 async function connect(auth: TokenProvider): Promise<Client> {
   const client = new Client({ name: "box-upload-harness", version: "0.2.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(HOSTED_MCP), {
+  const endpoint = boxEndpoints().mcp;
+  const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     fetch: async (url, init) => {
-      if (new URL(String(url)).origin !== HOSTED_MCP)
+      if (new URL(String(url)).origin !== new URL(endpoint).origin)
         throw new Error("Untrusted MCP endpoint.");
       const headers = new Headers(init?.headers);
       headers.set("Authorization", `Bearer ${await auth.getAccessToken()}`);
@@ -131,20 +146,32 @@ async function connect(auth: TokenProvider): Promise<Client> {
           /* Non-JSON transport message. */
         }
       }
-      return tracedFetch(
-        url,
-        {
-          ...init,
-          headers,
-          redirect: "error",
-          signal: AbortSignal.timeout(60_000),
-        },
-        step,
-        "Next.js server → Box-hosted MCP",
-        auth.app ? AUTH_APP_LABEL[auth.app] : undefined,
-        why,
-        method === "GET" ? [405] : [409],
-      );
+      const send = () =>
+        tracedFetch(
+          url,
+          {
+            ...init,
+            headers,
+            redirect: "error",
+            signal: AbortSignal.timeout(60_000),
+          },
+          step,
+          "Next.js server → Box-hosted MCP",
+          auth.app ? AUTH_APP_LABEL[auth.app] : undefined,
+          why,
+          method === "GET" ? [405] : [409],
+        );
+      let response = await send();
+      if (response.status === 401) {
+        await response.body?.cancel();
+        const rejected = headers.get("Authorization")!.slice("Bearer ".length);
+        headers.set(
+          "Authorization",
+          `Bearer ${await auth.getAccessToken(rejected)}`,
+        );
+        response = await send();
+      }
+      return response;
     },
   });
   await client.connect(transport);
@@ -218,26 +245,65 @@ export function hostedWhoAmI(auth: TokenProvider) {
   );
 }
 
+async function listAll(client: Client, folderId: string): Promise<BoxEntry[]> {
+  const items: BoxEntry[] = [];
+  const seen = new Set<string>();
+  const markers = new Set<string>();
+  let offset = 0;
+  let marker: string | undefined;
+  for (;;) {
+    const limit = 200;
+    const raw = await call<unknown>(
+      client,
+      "list_folder_content_by_folder_id",
+      {
+        folder_id: folderId,
+        fields: ["id", "type", "name", "size", "modified_at"],
+        limit,
+        ...(marker ? { usemarker: true, marker } : { offset }),
+      },
+    );
+    const page = pageSchema.parse(raw);
+    for (const entry of page.entries) {
+      const key = `${entry.type}:${entry.id}`;
+      if (seen.has(key))
+        throw new HttpError(
+          502,
+          "Box MCP repeated a folder page. Refresh the listing.",
+        );
+      seen.add(key);
+      items.push(entry);
+    }
+    if (page.next_marker) {
+      if (markers.has(page.next_marker) || !page.entries.length)
+        throw new HttpError(502, "Box MCP returned invalid pagination.");
+      markers.add(page.next_marker);
+      marker = page.next_marker;
+      continue;
+    }
+    if (marker || page.next_marker === null) break;
+    const next = offset + (page.limit ?? page.entries.length);
+    if (page.total_count !== undefined) {
+      if (next >= page.total_count) break;
+      if (!page.entries.length || next <= offset)
+        throw new HttpError(
+          502,
+          "Box MCP returned an incomplete folder listing.",
+        );
+    } else if (page.entries.length < (page.limit ?? limit)) break;
+    offset = next;
+  }
+  return items;
+}
+
 export function hostedListFolder(
   auth: TokenProvider,
   folderId: string,
 ): Promise<BoxEntry[]> {
-  return withHosted(auth, async (client) =>
-    entriesOf(
-      await call<unknown>(client, "list_folder_content_by_folder_id", {
-        folder_id: folderId,
-        fields: ["id", "type", "name", "size", "modified_at"],
-        limit: 200,
-      }),
-    ),
-  );
+  return withHosted(auth, (client) => listAll(client, folderId));
 }
 
-/**
- * Folder-by-name, still without touching REST: search under the root, and
- * create the folder only when asked to. `search_folders_by_name` matches on
- * keywords, so the exact name is confirmed before the ID is used.
- */
+/** Resolve only immediate children: an ancestor search could select a nested namesake. */
 export function hostedResolveFolder(
   auth: TokenProvider,
   rootFolderId: string,
@@ -245,34 +311,26 @@ export function hostedResolveFolder(
   create = false,
 ): Promise<string | null> {
   if (!name) return Promise.resolve(rootFolderId);
-  const isMatch = (entry: BoxEntry) =>
-    entry.type === "folder" && entry.name === name;
+  const safe = assertSafeName(name, "folder");
   return withHosted(auth, async (client) => {
-    const listed = entriesOf(
-      await call<unknown>(client, "list_folder_content_by_folder_id", {
-        folder_id: rootFolderId,
-        fields: ["id", "type", "name"],
-        limit: 1000,
-      }),
-    ).find(isMatch);
-    if (listed) return listed.id;
-    const searched = entriesOf(
-      await call<unknown>(client, "search_folders_by_name", {
-        folder_name: name,
-        ancestor_folder_id: rootFolderId,
-        limit: 200,
-      }),
-    ).find(isMatch);
-    if (searched) return searched.id;
-    if (!create) return null;
-    const created = await call<BoxEntry & { folder_id?: string }>(
-      client,
-      "create_folder",
-      { name, parent_folder_id: rootFolderId },
+    const existing = (await listAll(client, rootFolderId)).find(
+      (entry) => entry.type === "folder" && entry.name === safe,
     );
-    const id = created.id ?? created.folder_id;
+    if (existing) return existing.id;
+    if (!create) return null;
+    const created = await call<unknown>(client, "create_folder", {
+      name: safe,
+      parent_folder_id: rootFolderId,
+    });
+    const value = z
+      .object({
+        id: z.string().min(1).optional(),
+        folder_id: z.string().min(1).optional(),
+      })
+      .parse(created);
+    const id = value.id ?? value.folder_id;
     if (!id)
-      throw new HttpError(502, `Box MCP create_folder returned no folder id.`);
+      throw new HttpError(502, "Box MCP create_folder returned no folder id.");
     return id;
   });
 }
@@ -291,19 +349,31 @@ export function hostedUploadUrl(
     fileId?: string;
   },
 ) {
-  return withHosted(auth, (client) =>
-    call<{ upload_url: string; upload_token?: string }>(
-      client,
-      "get_upload_url",
-      {
-        file_name: args.fileName,
-        file_size_bytes: args.fileSizeBytes,
-        ...(args.fileId
-          ? { file_id: args.fileId }
-          : { parent_folder_id: args.parentFolderId ?? "0" }),
-      },
-    ),
-  );
+  return withHosted(auth, async (client) => {
+    const raw = await call<unknown>(client, "get_upload_url", {
+      file_name: args.fileName,
+      file_size_bytes: args.fileSizeBytes,
+      ...(args.fileId
+        ? { file_id: args.fileId }
+        : { parent_folder_id: args.parentFolderId ?? "0" }),
+    });
+    const parsed = z
+      .object({ upload_url: z.string().url(), upload_token: z.string().min(1) })
+      .safeParse(raw);
+    if (!parsed.success)
+      throw new HttpError(
+        502,
+        "Box MCP did not return a valid upload ticket. No full access token was released.",
+      );
+    const ticket = parsed.data;
+    assertTrustedBoxTarget(ticket.upload_url);
+    if (ticket.upload_token === (await auth.getAccessToken()))
+      throw new HttpError(
+        502,
+        "Box MCP returned a full access token instead of an upload ticket.",
+      );
+    return ticket;
+  });
 }
 
 /**
@@ -312,10 +382,35 @@ export function hostedUploadUrl(
  * and small documents, not for data files.
  */
 export const TEXT_EXTENSIONS = [
-  "txt", "md", "boxnote", "html", "svg", "xml",
-  "csv", "json", "js", "ts", "py", "sh",
+  "txt",
+  "md",
+  "boxnote",
+  "html",
+  "svg",
+  "xml",
+  "csv",
+  "json",
+  "js",
+  "ts",
+  "py",
+  "sh",
 ];
 export const TEXT_INLINE_LIMIT = 256 * 1024;
+
+/** Preserve BOMs and reject any decoding that cannot reproduce the exact bytes. */
+export function decodeInlineText(bytes: Uint8Array): string | undefined {
+  try {
+    const text = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
+    return Buffer.from(text, "utf8").equals(Buffer.from(bytes))
+      ? text
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function isSmallText(fileName: string, size: number): boolean {
   const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
@@ -369,8 +464,7 @@ export async function hostedFindFile(
  */
 export async function hostedPostBytes(args: {
   uploadUrl: string;
-  uploadToken?: string;
-  fallbackToken: string;
+  uploadToken: string;
   fileName: string;
   parentFolderId?: string;
   bytes: Uint8Array<ArrayBuffer>;
@@ -387,12 +481,12 @@ export async function hostedPostBytes(args: {
   );
   form.append("file", new Blob([args.bytes]), args.fileName);
   const response = await tracedFetch(
-    args.uploadUrl,
+    assertTrustedBoxTarget(args.uploadUrl),
     {
       method: "POST",
       body: form,
       headers: {
-        Authorization: `Bearer ${args.uploadToken ?? args.fallbackToken}`,
+        Authorization: `Bearer ${args.uploadToken}`,
       },
       redirect: "error",
       signal: AbortSignal.timeout(15 * 60_000),

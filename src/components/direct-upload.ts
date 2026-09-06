@@ -1,6 +1,13 @@
 import { createSHA1 } from "hash-wasm";
 
 export class DirectNetworkError extends Error {}
+export class DirectUncertainError extends Error {
+  constructor() {
+    super(
+      "Box may have saved this file. The upload outcome is uncertain; refresh the destination before retrying. No automatic retry was made.",
+    );
+  }
+}
 /**
  * The server decided this file belongs on the Next.js server route rather than
  * a browser upload — for example Box MCP's inline `upload_file`, which only a
@@ -103,6 +110,12 @@ async function control(body: Record<string, unknown>, log: DirectLog) {
   });
   // Children after the parent, so the trace reads top-down.
   for (const request of data.requests ?? []) log(request);
+  if (
+    body.action === "prepare" &&
+    !response.ok &&
+    (response.status === 401 || response.status === 403)
+  )
+    throw new DirectRefusedError(response.status, undefined, data.error);
   if (!response.ok)
     throw new Error(data.error ?? "Could not prepare the Box upload.");
   return data;
@@ -244,13 +257,12 @@ export async function directUpload(
           ? "Direct upload, browser to Box, using the single-use URL from Box MCP get_upload_url"
           : "Direct upload, browser to Box: the whole file, using the downscoped token",
       );
-    } catch (error) {
-      // A rejected preflight means the body was never sent, which is the
-      // common case here; a mid-body drop is indistinguishable in the browser.
-      // Retrying is safe either way: a same-name upload becomes a new version
-      // rather than a duplicate file.
-      throw error;
+    } catch {
+      // A rejected preflight and a lost response after a successful POST are
+      // indistinguishable. Replaying either here could create an extra version.
+      throw new DirectUncertainError();
     }
+    if (response.status >= 500) throw new DirectUncertainError();
     await check(response);
     const result = await response.json();
     if (!result.entries?.[0]?.id)
@@ -273,7 +285,7 @@ export async function directUpload(
       "session probe",
       "Checking the browser can reach the upload session before sending parts",
     );
-    check(probe);
+    await check(probe);
     await probe.body?.cancel();
     const hasher = await createSHA1();
     hasher.init();

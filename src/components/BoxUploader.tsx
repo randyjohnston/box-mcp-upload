@@ -23,6 +23,7 @@ type Transfer = {
   phase: "queued" | "staging" | "uploading" | "done" | "error";
   progress: number;
   detail: string;
+  fileId?: string;
 };
 type BoxFile = { id: string; name: string; size?: number; type: string };
 const MB = 1024 * 1024;
@@ -120,7 +121,9 @@ export default function BoxUploader() {
       setSession(data);
       if (!authRecorded.current && data.connected) {
         authRecorded.current = true;
-        const label = data.primaryApp ? APP_LABEL[data.primaryApp] : "Platform CCG";
+        const label = data.primaryApp
+          ? APP_LABEL[data.primaryApp]
+          : "Platform CCG";
         for (const event of data.authEvents ?? [])
           record(
             label,
@@ -152,7 +155,11 @@ export default function BoxUploader() {
         const body = await jsonRequest(
           `/api/files?folder=${encodeURIComponent(name)}`,
           undefined,
-          record(label, name || "Root", "Configured: local MCP folder tool"),
+          record(
+            label,
+            name || "Root",
+            "Folder lookup runs through MCP tools in the Next.js process",
+          ),
         );
         if (sequence === listingSequence.current) {
           setFiles(body.items.filter((item: BoxFile) => item.type === "file"));
@@ -287,17 +294,18 @@ export default function BoxUploader() {
         //     route the bytes through the Next.js server instead.
         const label = (app?: AuthApp) =>
           app ? APP_LABEL[app] : "Platform CCG";
+        const destinationLabel = (app?: AuthApp) => {
+          const credential = session.apps.find((entry) => entry.app === app);
+          const identity = credential?.identity;
+          return `${label(app)} · ${identity ? `${identity.name} (${identity.id})` : "account identity unavailable"} · root ${credential?.rootFolderId ?? "0"}`;
+        };
         const order = [session.primaryApp, session.fallbackApp].filter(
           (app): app is AuthApp => Boolean(app),
         );
-        // Remembering a blocked credential is an optimisation, not a verdict:
-        // if skipping would leave nothing to attempt, attempt everything again
-        // rather than failing without making a single request.
-        const unblocked = order.filter(
+        // Only explicit Retry browser upload or reconnection clears this cache.
+        const candidates = order.filter(
           (app) => !directBlockedRef.current.has(app),
         );
-        const candidates = unblocked.length ? unblocked : order;
-        const retryingBlocked = unblocked.length === 0 && order.length > 0;
 
         const viaServer = async (app?: AuthApp, why?: string) => {
           const serverLog = record(
@@ -343,9 +351,7 @@ export default function BoxUploader() {
               file.name,
               isRetry
                 ? `Credential fallback: ${label(candidates[0])} failed, so the browser retries with ${label(app)}`
-                : retryingBlocked
-                  ? `${label(app)} failed earlier in this tab, but nothing else is connected, so it is retried`
-                  : "Browser uploads first, as configured",
+                : "Browser uploads first, as configured",
             );
             patch({
               phase: "uploading",
@@ -361,18 +367,19 @@ export default function BoxUploader() {
                 directLog,
                 app,
               );
-              path = `uploaded by the browser · ${label(app)}`;
+              path = `uploaded by the browser · ${destinationLabel(app)}`;
               break;
             } catch (error) {
-              // The server chose the Next.js route for this file (Box MCP's
-              // inline upload_file). Take it regardless of the fallback
-              // toggle: nothing failed, and no other credential would help.
               if (error instanceof ServerRouteRequired) {
+                if (!allowFallback)
+                  throw new Error(
+                    "This MCP text upload requires server bytes, but server bytes are disabled. Enable the setting or connect a Platform app alone for direct upload.",
+                  );
                 result = await viaServer(
                   app,
                   `Chosen route: ${error.via} takes the content in one call, which only a credential holder can make`,
                 );
-                path = `uploaded by the Next.js server · ${label(app)}`;
+                path = `uploaded by the Next.js server · ${destinationLabel(app)}`;
                 break;
               }
               const blocked = error instanceof DirectNetworkError;
@@ -392,7 +399,7 @@ export default function BoxUploader() {
               const cause =
                 lastFailure instanceof Error
                   ? lastFailure.message
-                  : "No connected Box credential could upload this file.";
+                  : "Browser uploads are paused for these credentials. Choose Retry browser upload to try again.";
               throw new Error(
                 `${cause} Next.js server fallback is off, so the upload stopped.`,
               );
@@ -404,12 +411,13 @@ export default function BoxUploader() {
                 ? session.fallbackApp
                 : session.primaryApp;
             result = await viaServer(serverApp);
-            path = `uploaded by the Next.js server · ${label(serverApp)}`;
+            path = `uploaded by the Next.js server · ${destinationLabel(serverApp)}`;
           }
 
           patch({
             phase: "done",
             progress: 1,
+            fileId: result.id,
             detail: `Saved to Box, ${path}${result.newVersion ? " · New version" : ""}`,
           });
           if (folderRef.current.trim() === destination)
@@ -455,7 +463,9 @@ export default function BoxUploader() {
           setDirectBlocked(new Set());
         }}
         inspect={async () => {
-          const label = session?.primaryApp ? APP_LABEL[session.primaryApp] : "Platform CCG";
+          const label = session?.primaryApp
+            ? APP_LABEL[session.primaryApp]
+            : "Platform CCG";
           const result = await jsonRequest(
             "/api/connection",
             undefined,
@@ -594,9 +604,9 @@ export default function BoxUploader() {
             Let the Next.js server carry file bytes
           </label>
           <p className="field-help">
-            Applies only to the file bytes, and only after every connected
-            credential has failed to upload from the browser. With this off, a
-            failed browser upload stops.
+            Allows server fallback after a safe browser failure and the MCP
+            inline text route. With this off, neither route can carry file bytes
+            through this server. Uncertain writes always stop for review.
           </p>
           <dl>
             <div>
@@ -641,13 +651,13 @@ export default function BoxUploader() {
                 <div>
                   <dt>Box MCP tools used</dt>
                   <dd>
-                    <code>who_am_i</code> · <code>search_folders_by_name</code>{" "}
-                    · <code>create_folder</code> ·{" "}
+                    <code>who_am_i</code> · <code>create_folder</code> ·{" "}
                     <code>list_folder_content_by_folder_id</code> ·{" "}
                     <code>upload_file</code> · <code>get_upload_url</code>
                     <br />
                     <span className="muted-note">
-                      No REST call is made on this path.
+                      Uploads use hosted MCP tools; sign-in checks identity
+                      through the Box API.
                     </span>
                   </dd>
                 </div>
@@ -666,8 +676,8 @@ export default function BoxUploader() {
                       the bytes. It is not a chunked upload: Box&rsquo;s MCP
                       surface publishes no session, part or commit tool, so
                       there is no splitting, no per-part retry and no resume.
-                      The URL and token are single-use and expire after 10
-                      minutes, which is the real limit on very large files.
+                      Tickets expire; the browser POST also has a 60-second
+                      timeout. A lost response stops for manual review.
                     </span>
                   </dd>
                 </div>
@@ -687,8 +697,8 @@ export default function BoxUploader() {
                     <br />
                     <span className="muted-note">
                       Under 20 MiB the browser posts to{" "}
-                      <code>upload.box.com</code>, which enforces the app&rsquo;s
-                      CORS Domains list and answers{" "}
+                      <code>upload.box.com</code>, which enforces the
+                      app&rsquo;s CORS Domains list and answers{" "}
                       <code>403 cors_origin_not_whitelisted</code> when this
                       origin is missing. Chunked parts go to{" "}
                       <code>upload.app.box.com</code>, which accepted parts here
@@ -704,8 +714,9 @@ export default function BoxUploader() {
                 CORS, DNS, filtering, timeout — or Box answering 401/403
                 <br />
                 <span className="muted-note">
-                  Both are per Box application, so the other credential is
-                  tried before the Next.js server.
+                  Safe failures try the other connected credential first. It may
+                  use a different account or root; each result names the
+                  destination.
                 </span>
               </dd>
             </div>
@@ -762,6 +773,19 @@ export default function BoxUploader() {
                   role={item.phase === "error" ? "alert" : "status"}
                 >
                   {item.detail}
+                  {item.fileId && (
+                    <>
+                      {" "}
+                      ·{" "}
+                      <a
+                        href={`https://app.box.com/file/${encodeURIComponent(item.fileId)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Open saved file
+                      </a>
+                    </>
+                  )}
                 </p>
               </div>
             </div>
@@ -782,6 +806,13 @@ export default function BoxUploader() {
                     {" "}
                     <code>{listedFolderId}</code>
                   </>
+                )}
+                {session.fallbackApp && (
+                  <span className="muted-note">
+                    {" "}
+                    · Listing the primary account; alternate-account uploads
+                    have links in Transfers.
+                  </span>
                 )}
                 {primaryIdentity && (
                   <>

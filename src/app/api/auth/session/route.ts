@@ -30,6 +30,10 @@ export async function GET(req: Request) {
       app,
       configured: app === "ccg" ? ccgConfigured() : oauthAppConfigured(app),
       connected: connected.includes(app),
+      rootFolderId:
+        (app === "ccg"
+          ? process.env.BOX_CCG_ROOT_FOLDER_ID
+          : process.env.BOX_USER_ROOT_FOLDER_ID) || "0",
       role:
         app === primary ? "primary" : app === fallback ? "fallback" : undefined,
       clientId:
@@ -69,7 +73,7 @@ export async function GET(req: Request) {
           passwordRequired: Boolean(process.env.APP_ACCESS_PASSWORD),
           subjectType: process.env.BOX_CCG_USER_ID ? "user" : "enterprise",
           subjectId:
-            process.env.BOX_CCG_USER_ID ?? process.env.BOX_CCG_ENTERPRISE_ID,
+            process.env.BOX_CCG_USER_ID || process.env.BOX_CCG_ENTERPRISE_ID,
         },
         authEvents: session?.authEvents ?? [],
       },

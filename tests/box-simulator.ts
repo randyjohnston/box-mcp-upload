@@ -32,7 +32,7 @@ type Upload = {
 };
 const tokens = new Map<
   string,
-  { owner: string; folder?: string; expired?: boolean }
+  { owner: string; folder?: string; expired?: boolean; singleUse?: boolean }
 >();
 const refresh = new Map<string, string>();
 const codes = new Map<
@@ -52,6 +52,7 @@ const metrics = {
   parts: 0,
   aborted: 0,
   badPkce: 0,
+  hostedCalls: [] as string[],
 };
 const sha1 = (bytes: Buffer) => createHash("sha1").update(bytes).digest("hex");
 const id = () => String(next++);
@@ -108,7 +109,7 @@ const server = http.createServer(async (req, res) => {
   const conflict = (item: Item) =>
     send(409, { code: "item_name_in_use", context_info: { conflicts: item } });
   const requestOrigin = req.headers.origin;
-  if (requestOrigin && /^http:\/\/127\.0\.0\.1:310[01]$/.test(requestOrigin)) {
+  if (requestOrigin && /^http:\/\/127\.0\.0\.1:310[012]$/.test(requestOrigin)) {
     res.setHeader("Access-Control-Allow-Origin", requestOrigin);
     res.setHeader(
       "Access-Control-Allow-Methods",
@@ -153,10 +154,18 @@ const server = http.createServer(async (req, res) => {
         return send(400);
       const code = randomUUID();
       const redirect = url.searchParams.get("redirect_uri")!;
+      const boxIdentity =
+        /(?:^|; )box_test_identity=([^;]+)/.exec(
+          req.headers.cookie ?? "",
+        )?.[1] ?? `oauth-${id()}`;
+      res.setHeader(
+        "Set-Cookie",
+        `box_test_identity=${boxIdentity}; Path=/; HttpOnly; SameSite=Lax`,
+      );
       codes.set(code, {
         challenge,
         redirect,
-        owner: `oauth-${id()}`,
+        owner: boxIdentity,
         clientId: url.searchParams.get("client_id")!,
       });
       const destination = new URL(redirect);
@@ -240,10 +249,119 @@ const server = http.createServer(async (req, res) => {
     if (!auth || auth.expired)
       return send(401, { message: "secret-upstream-detail" });
     const owner = auth.owner;
+    if (url.pathname === "/mcp") {
+      if (auth.folder) return send(403);
+      if (req.method === "GET") return send(405);
+      if (req.method === "DELETE") return send(204);
+      const rpc = JSON.parse(raw.toString());
+      const reply = (result: unknown) =>
+        send(200, { jsonrpc: "2.0", id: rpc.id, result });
+      if (rpc.method === "initialize")
+        return reply({
+          protocolVersion: rpc.params.protocolVersion,
+          capabilities: { tools: {} },
+          serverInfo: { name: "Box simulator", version: "1" },
+        });
+      if (rpc.method.startsWith("notifications/")) return send(202);
+      const names = [
+        "who_am_i",
+        "list_folder_content_by_folder_id",
+        "create_folder",
+        "get_upload_url",
+        "upload_file",
+        "upload_file_version",
+      ];
+      if (rpc.method === "tools/list")
+        return reply({
+          tools: names.map((name) => ({
+            name,
+            inputSchema: { type: "object", properties: {} },
+          })),
+        });
+      if (rpc.method !== "tools/call") return send(400);
+      const { name, arguments: args } = rpc.params;
+      metrics.hostedCalls.push(name);
+      const result = (data: unknown, isError = false) =>
+        reply({
+          content: [{ type: "text", text: JSON.stringify(data) }],
+          isError,
+        });
+      const children = (folder: string) =>
+        items.filter(
+          (item) => item.owner === owner && item.parent.id === folder,
+        );
+      if (name === "who_am_i")
+        return result({
+          id: owner,
+          name: owner,
+          login: `${owner}@example.test`,
+        });
+      if (name === "list_folder_content_by_folder_id") {
+        const all = children(args.folder_id);
+        const offset = Number(args.offset ?? 0);
+        // Deliberately clamp pages to exercise clients' pagination logic.
+        return result({
+          entries: all.slice(offset, offset + 2),
+          offset,
+          limit: 2,
+          total_count: all.length,
+        });
+      }
+      if (name === "create_folder") {
+        if (
+          children(args.parent_folder_id).some(
+            (item) => item.name === args.name,
+          )
+        )
+          return result({ code: "item_name_in_use" }, true);
+        const folder: Item = {
+          id: id(),
+          type: "folder",
+          name: args.name,
+          owner,
+          parent: { id: args.parent_folder_id },
+          size: 0,
+          version: 1,
+        };
+        items.push(folder);
+        return result(folder);
+      }
+      const existing = args.file_id
+        ? items.find((item) => item.id === args.file_id && item.owner === owner)
+        : undefined;
+      if (args.file_id && !existing) return result({ code: "not_found" }, true);
+      const folder = existing?.parent.id ?? args.parent_folder_id;
+      const fileName = existing?.name ?? args.file_name;
+      if (!existing && children(folder).some((item) => item.name === fileName))
+        return result({ code: "item_name_in_use" }, true);
+      if (name === "get_upload_url") {
+        const token = randomUUID();
+        tokens.set(token, { owner, folder, singleUse: true });
+        return result({
+          upload_url: `${origin}/api/2.0/files/${existing ? `${existing.id}/` : ""}content`,
+          upload_token: token,
+        });
+      }
+      if (name === "upload_file" || name === "upload_file_version") {
+        const file = save(
+          owner,
+          fileName,
+          folder,
+          Buffer.from(args.file_content, "utf8"),
+          existing?.id,
+        );
+        return result({
+          file_id: file.id,
+          file_name: file.name,
+          size: file.size,
+        });
+      }
+      return result({ error: "unknown_tool" }, true);
+    }
     const path = url.pathname.replace(/^\/(api\/)?2\.0/, "");
     if (path === "/users/me")
       return send(200, {
-        id: "1",
+        id: owner,
         name: owner,
         login: `${owner}@example.test`,
       });
@@ -314,6 +432,8 @@ const server = http.createServer(async (req, res) => {
           item.name === input.name,
       );
       if (!fileId && existing) return conflict(existing);
+      if (auth.singleUse)
+        tokens.delete(req.headers.authorization!.replace("Bearer ", ""));
       return send(201, {
         entries: [
           save(

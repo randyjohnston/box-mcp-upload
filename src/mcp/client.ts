@@ -4,7 +4,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { BoxClient } from "../box/client";
 import type { TokenProvider } from "../box/auth";
-import type { OAuthApp } from "../box/config";
 import { HttpError } from "../errors";
 import { createBoxServer } from "./tools";
 

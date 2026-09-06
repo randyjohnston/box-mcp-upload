@@ -108,8 +108,7 @@ async function attachCredential(
   };
   // Replacing the same app releases its token. So does switching between the
   // two platform flows, which are alternatives rather than a pair.
-  const exclusive: AuthApp[] =
-    app === "mcp" ? ["mcp"] : ["platform", "ccg"];
+  const exclusive: AuthApp[] = app === "mcp" ? ["mcp"] : ["platform", "ccg"];
   for (const key of exclusive) {
     const replaced = session.credentials.get(key);
     if (!replaced) continue;
@@ -126,7 +125,9 @@ async function attachCredential(
   session.credentials.set(app, credential);
   // Resolve the Box account once here rather than on every session poll. A
   // failure must not block sign-in: the credential still works without a name.
-  credential.identity = await whoAmI(new BoxClient(auth)).catch(() => undefined);
+  credential.identity = await whoAmI(new BoxClient(auth)).catch(
+    () => undefined,
+  );
   session.authEvents = currentRequests();
   session.expiresAt = Date.now() + SESSION_TTL;
   store.sessions.set(session.id, session);

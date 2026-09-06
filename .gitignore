@@ -17,3 +17,6 @@ next-env.d.ts
 
 # Generated upload test corpus
 testfiles/
+
+# archify visual-check QA evidence (regenerate with visual-check)
+docs/diagrams/*.visual-check.*

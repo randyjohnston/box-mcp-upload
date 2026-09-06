@@ -59,6 +59,13 @@ function isTrustedBoxTarget(
   );
 }
 
+export function assertTrustedBoxTarget(url: string): string {
+  const target = new URL(url);
+  if (!isTrustedBoxTarget(target, boxEndpoints()))
+    throw new Error("Untrusted Box API endpoint.");
+  return target.href;
+}
+
 export class BoxClient {
   constructor(private readonly auth: TokenProvider) {}
   get rootFolderId() {

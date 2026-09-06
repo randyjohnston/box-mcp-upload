@@ -133,14 +133,14 @@ test("configuration and file names fail closed", () => {
   delete process.env.BOX_CCG_CLIENT_ID;
   assert.throws(boxConfig, /configuration/);
   process.env.BOX_CCG_CLIENT_ID = "test";
-    process.env.APP_ORIGIN = "http://example.com";
+  process.env.APP_ORIGIN = "http://example.com";
   assert.throws(appOrigin);
   delete process.env.APP_ORIGIN;
 });
 
 test("OAuth refresh rotates once, handles 401 races, and prevents use after revoke", async () => {
   const original = globalThis.fetch;
-    process.env.BOX_OAUTH_CLIENT_ID = "test";
+  process.env.BOX_OAUTH_CLIENT_ID = "test";
   process.env.BOX_OAUTH_CLIENT_SECRET = "test";
   let requests = 0;
   globalThis.fetch = async () => {
@@ -169,7 +169,7 @@ test("OAuth refresh rotates once, handles 401 races, and prevents use after revo
     await assert.rejects(auth.getAccessToken(), /reconnect/);
   } finally {
     globalThis.fetch = original;
-      }
+  }
 });
 
 test("trusts the upload host Box actually returns, and nothing that merely looks like it", async () => {
@@ -278,7 +278,7 @@ test("browser token is refused unless upload-only and restricted to the requeste
 test("each authentication option selects its own credentials and destination root", async () => {
   const before = { ...process.env };
   try {
-        process.env.BOX_MCP_CLIENT_ID = "mcp-id";
+    process.env.BOX_MCP_CLIENT_ID = "mcp-id";
     process.env.BOX_MCP_CLIENT_SECRET = "mcp-secret";
     process.env.BOX_OAUTH_CLIENT_ID = "platform-id";
     process.env.BOX_OAUTH_CLIENT_SECRET = "platform-secret";

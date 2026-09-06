@@ -1,103 +1,203 @@
 import { test, expect, type Page } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
+const simulator = "http://127.0.0.1:3130";
+const serverToggle = "Let the Next.js server carry file bytes";
 
-const connectButton = (page: Page) =>
-  page.getByRole("button", {
-    name: /^(Connect Platform CCG|Sign in with platform app)$/,
-  });
+async function platformConnect(page: Page, mode: "ccg" | "oauth") {
+  await page
+    .getByRole("radio", {
+      name: mode === "ccg" ? /Client credentials/ : /Authorization code/,
+    })
+    .check();
+  if (mode === "ccg" && (await page.getByLabel("Access password").isVisible()))
+    await page.getByLabel("Access password").fill("test-workspace-password");
+  await Promise.all([
+    page.waitForResponse(async (response) => {
+      if (!response.url().endsWith("/api/auth/session") || !response.ok())
+        return false;
+      const session = await response.json();
+      return session.apps.some(
+        (app: { app: string; connected: boolean }) =>
+          app.app === (mode === "ccg" ? "ccg" : "platform") && app.connected,
+      );
+    }),
+    page.locator(".auth-card form").getByRole("button").click(),
+  ]);
+  await expect(page.locator(".connection")).toContainText("Box connected");
+}
 async function connect(page: Page) {
   await page.goto("/");
-  await expect(connectButton(page)).toBeEnabled();
-  const password = page.getByLabel("Access password");
-  if (await password.isVisible())
-    await password.fill("test-workspace-password");
-  await connectButton(page).click();
-  await expect(page.getByText(/^Box connected/)).toBeVisible();
+  if (test.info().project.name === "mcp") {
+    await page
+      .getByRole("button", { name: "Connect MCP integration", exact: true })
+      .click();
+    await expect(page.locator(".connection")).toContainText("MCP integration");
+  } else
+    await platformConnect(page, test.info().project.name as "ccg" | "oauth");
 }
 async function choose(page: Page, name: string, buffer: Buffer) {
   await page
     .getByLabel("Choose files")
     .setInputFiles({ name, mimeType: "application/octet-stream", buffer });
 }
+async function saved(page: Page) {
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "Saved to Box",
+    { timeout: 60_000 },
+  );
+}
+const unique = (prefix: string) =>
+  `${prefix}-${test.info().project.name}-${Date.now()}`;
 
 for (const fallback of [false, true]) {
-  test(`${fallback ? "network fallback" : "direct"}: simple, chunked, versions and hashes`, async ({
+  test(`${fallback ? "server fallback" : "direct"}: simple, large, versions and hashes`, async ({
     page,
     request,
-  }, info) => {
+  }) => {
     await connect(page);
-    const folder = `e2e-${info.project.name}-${fallback}-${Date.now()}`;
-    await page.getByLabel("Destination folder").fill(folder);
+    await page.getByLabel("Destination folder").fill(unique("uploads"));
     let stages = 0;
     page.on("request", (req) => {
       if (req.url().endsWith("/api/uploads")) stages++;
     });
+    // An explicit refusal is safe to retry. An opaque simple POST failure is not.
     if (fallback)
-      await page.route("http://127.0.0.1:3130/**", (route) =>
-        route.abort("blockedbyclient"),
+      await page.route(`${simulator}/api/2.0/**`, (route) =>
+        route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({ code: "cors_origin_not_whitelisted" }),
+        }),
       );
-    let transferCount = 0;
     for (const size of [2048, 21 * 1024 ** 2]) {
-      const name = `file-${size}-${Date.now()}.bin`;
+      const name = `${unique(String(size))}.bin`;
       const buffer = randomBytes(size);
       for (let version = 1; version <= 2; version++) {
         await choose(page, name, buffer);
-        await expect(page.locator(".transfer")).toHaveCount(++transferCount);
-        await expect(
-          page
-            .locator(".transfer")
-            .last()
-            .getByText(
-              `Saved to Box · ${fallback ? "Server fallback" : "Direct"}${version === 2 ? " · New version" : ""}`,
-              { exact: true },
-            )
-            .last(),
-        ).toBeVisible({ timeout: 60_000 });
+        await saved(page);
+        await expect(page.locator(".transfer-status").last()).toContainText(
+          fallback ? "Next.js server" : "browser",
+        );
+        if (version === 2)
+          await expect(page.locator(".transfer-status").last()).toContainText(
+            "New version",
+          );
         await expect(
           page.getByRole("link", { name, exact: true }),
         ).toBeVisible();
       }
-      const metrics = await (
-        await request.get("http://127.0.0.1:3130/metrics")
-      ).json();
-      const file = metrics.files.find(
-        (file: { name: string }) => file.name === name,
-      );
-      expect(file).toMatchObject({
+      const metrics = await (await request.get(`${simulator}/metrics`)).json();
+      expect(
+        metrics.files.find((f: { name: string }) => f.name === name),
+      ).toMatchObject({
         size,
         version: 2,
         sha1: createHash("sha1").update(buffer).digest("hex"),
       });
     }
     expect(stages).toBe(fallback ? 4 : 0);
-    await page.screenshot({
-      path: `test-results/${info.project.name}-${fallback ? "fallback" : "direct"}.png`,
-      fullPage: true,
-    });
   });
 }
 
-test("HTTP permission failures do not trigger fallback", async ({ page }) => {
+test("opaque simple POST failure stops without staging or another version", async ({
+  page,
+  request,
+}) => {
   await connect(page);
-  await page.route("http://127.0.0.1:3130/**", (route) =>
-    route.fulfill({
-      status: 403,
-      headers: { "Access-Control-Allow-Origin": new URL(page.url()).origin },
-      body: "{}",
-    }),
-  );
-  let staged = false;
+  let stages = 0;
   page.on("request", (req) => {
-    if (req.url().endsWith("/api/uploads")) staged = true;
+    if (req.url().endsWith("/api/uploads")) stages++;
   });
-  await choose(page, `denied-${Date.now()}.bin`, Buffer.alloc(2048));
-  await expect(
-    page.getByRole("alert").filter({ hasText: "HTTP 403" }),
-  ).toBeVisible();
-  expect(staged).toBe(false);
+  // Actually save the file, then drop the response: the ambiguous-write case.
+  await page.route(`${simulator}/api/2.0/files/**`, async (route) => {
+    await route.fetch();
+    await route.abort("connectionreset");
+  });
+  const name = `${unique("uncertain")}.bin`;
+  await choose(page, name, Buffer.from("accepted once"));
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "outcome is uncertain",
+  );
+  expect(stages).toBe(0);
+  const metrics = await (await request.get(`${simulator}/metrics`)).json();
+  expect(
+    metrics.files.filter((f: { name: string }) => f.name === name),
+  ).toMatchObject([{ version: 1 }]);
 });
 
-test("authentication, CSRF, validation and upload ownership", async ({
+test("failed chunk reachability aborts before server fallback", async ({
+  page,
+  request,
+}) => {
+  test.skip(
+    test.info().project.name === "mcp",
+    "Hosted MCP uses a single POST, not chunks",
+  );
+  await connect(page);
+  const before = await (await request.get(`${simulator}/metrics`)).json();
+  await page.route(`${simulator}/api/2.0/files/upload_sessions/**`, (route) =>
+    route.abort("blockedbyclient"),
+  );
+  await choose(
+    page,
+    `${unique("blocked-chunks")}.bin`,
+    Buffer.alloc(21 * 1024 ** 2),
+  );
+  await saved(page);
+  const after = await (await request.get(`${simulator}/metrics`)).json();
+  expect(after.aborted - before.aborted).toBe(1);
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "Next.js server",
+  );
+});
+
+test("server bytes disabled stops explicit refusal and MCP inline text", async ({
+  page,
+}) => {
+  await connect(page);
+  await page.getByLabel(serverToggle).uncheck();
+  let stages = 0;
+  page.on("request", (req) => {
+    if (req.url().endsWith("/api/uploads")) stages++;
+  });
+  if (test.info().project.name === "mcp") {
+    await choose(page, "note.txt", Buffer.from("server forbidden"));
+    await expect(page.locator(".transfer-status").last()).toContainText(
+      "server bytes are disabled",
+    );
+  } else {
+    await page.route(`${simulator}/api/2.0/**`, (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: "{}",
+      }),
+    );
+    await choose(page, `${unique("denied")}.bin`, Buffer.alloc(2048));
+    await expect(page.locator(".transfer-status").last()).toContainText(
+      "fallback is off",
+    );
+  }
+  expect(stages).toBe(0);
+});
+
+test("HTTP 400 does not trigger fallback", async ({ page }) => {
+  await connect(page);
+  await page.route(`${simulator}/api/2.0/**`, (route) =>
+    route.fulfill({ status: 400, contentType: "application/json", body: "{}" }),
+  );
+  let stages = 0;
+  page.on("request", (req) => {
+    if (req.url().endsWith("/api/uploads")) stages++;
+  });
+  await choose(page, `${unique("bad-request")}.bin`, Buffer.alloc(100));
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "HTTP 400",
+  );
+  expect(stages).toBe(0);
+});
+
+test("authentication, CSRF, ownership, atomic commit and logout", async ({
   page,
   browser,
   request,
@@ -108,38 +208,30 @@ test("authentication, CSRF, validation and upload ownership", async ({
     403,
   );
   await connect(page);
-  const context = page.context();
+  const api = page.context().request;
   const headers = { Origin: baseURL!, "x-file-name": "test.bin" };
+  for (const name of ["%GG", "..%2Fsecret"])
+    expect(
+      (
+        await api.post("/api/uploads", {
+          headers: { ...headers, "x-file-name": name },
+          data: "x",
+        })
+      ).status(),
+    ).toBe(400);
   expect(
     (
-      await context.request.post("/api/uploads", {
+      await api.post("/api/uploads", {
         headers: { ...headers, Origin: "https://evil.example" },
         data: "x",
       })
     ).status(),
   ).toBe(403);
-  expect(
-    (
-      await context.request.post("/api/uploads", {
-        headers: { ...headers, "x-file-name": "%GG" },
-        data: "x",
-      })
-    ).status(),
-  ).toBe(400);
-  expect(
-    (
-      await context.request.post("/api/uploads", {
-        headers: { ...headers, "x-file-name": "..%2Fsecret" },
-        data: "x",
-      })
-    ).status(),
-  ).toBe(400);
   const staged = await (
-    await context.request.post("/api/uploads", { headers, data: "owned" })
+    await api.post("/api/uploads", { headers, data: "owned" })
   ).json();
   const other = await browser.newContext({ baseURL });
-  const otherPage = await other.newPage();
-  await connect(otherPage);
+  await connect(await other.newPage());
   expect(
     (
       await other.request.post(`/api/uploads/${staged.uploadId}/commit`, {
@@ -151,68 +243,65 @@ test("authentication, CSRF, validation and upload ownership", async ({
   await other.close();
   expect(
     (
-      await context.request.post(`/api/uploads/${staged.uploadId}/commit`, {
+      await api.post(`/api/uploads/${staged.uploadId}/commit`, {
         headers,
         data: { folder: 42 },
       })
     ).status(),
   ).toBe(400);
-  const committed = await context.request.post(
-    `/api/uploads/${staged.uploadId}/commit`,
-    { headers, data: {} },
-  );
+  const committed = await api.post(`/api/uploads/${staged.uploadId}/commit`, {
+    headers,
+    data: { folder: unique("security") },
+  });
   expect(await committed.text()).toContain("event: done");
   expect(
     (
-      await context.request.post(`/api/uploads/${staged.uploadId}/commit`, {
+      await api.post(`/api/uploads/${staged.uploadId}/commit`, {
         headers,
         data: {},
       })
     ).status(),
   ).toBe(404);
-  const cookies = await context.cookies();
-  expect(cookies.find((cookie) => cookie.name === "box_session")).toMatchObject(
-    { httpOnly: true, sameSite: "Lax" },
-  );
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(connectButton(page)).toBeVisible();
-  expect((await context.request.get("/api/files")).status()).toBe(401);
+  expect(
+    (await page.context().cookies()).find((c) => c.name === "box_session"),
+  ).toMatchObject({ httpOnly: true, sameSite: "Lax" });
+  await page
+    .getByRole("button", { name: "Disconnect all", exact: true })
+    .click();
+  await expect(page.locator(".connection")).toContainText("Not connected");
+  expect((await api.get("/api/files")).status()).toBe(401);
 });
 
-test("refresh is isolated and concurrent calls share renewal", async ({
+test("concurrent requests share one token renewal", async ({
   page,
   request,
-}, info) => {
+}) => {
   await connect(page);
-  await page.waitForTimeout(500);
-  const before = await (
-    await request.get("http://127.0.0.1:3130/metrics")
-  ).json();
-  await request.post("http://127.0.0.1:3130/expire");
+  await expect(page.getByText("Loading files…", { exact: true })).toBeHidden();
+  const before = await (await request.get(`${simulator}/metrics`)).json();
+  await request.post(`${simulator}/expire`);
   const responses = await Promise.all(
     Array.from({ length: 4 }, () => page.context().request.get("/api/files")),
   );
-  expect(responses.every((response) => response.ok())).toBe(true);
-  const after = await (
-    await request.get("http://127.0.0.1:3130/metrics")
-  ).json();
-  const field = info.project.name === "oauth" ? "refresh" : "ccg";
+  expect(responses.every((r) => r.ok())).toBe(true);
+  const after = await (await request.get(`${simulator}/metrics`)).json();
+  const field = test.info().project.name === "ccg" ? "ccg" : "refresh";
   expect(after[field] - before[field]).toBe(1);
 });
 
-test("OAuth state is required, single-use and bound to the browser", async ({
+test("OAuth state is browser-bound and single-use", async ({
   page,
   request,
   baseURL,
-}, info) => {
-  test.skip(info.project.name !== "oauth");
+}) => {
+  test.skip(test.info().project.name === "ccg");
   expect(
     (await request.get("/api/auth/callback?code=fake&state=fake")).status(),
   ).toBe(400);
   const login = await (
     await request.post("/api/auth/login", {
       headers: { Origin: baseURL! },
-      data: {},
+      data: { app: "platform" },
     })
   ).json();
   const authorize = await request.get(login.url, { maxRedirects: 0 });
@@ -224,130 +313,153 @@ test("OAuth state is required, single-use and bound to the browser", async ({
   expect((await request.get(callback, { maxRedirects: 0 })).status()).toBe(400);
 });
 
-test("responsive UI and upload validation", async ({ page }, info) => {
+test("responsive UI and empty-file validation", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await connect(page);
   await choose(page, "empty.txt", Buffer.alloc(0));
-  await expect(
-    page.getByRole("alert").filter({ hasText: "non-empty" }),
-  ).toBeVisible();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
-  await page.screenshot({
-    path: `test-results/${info.project.name}-mobile.png`,
-    fullPage: true,
-  });
-});
-
-test("OAuth app selection and per-request credential trace", async ({
-  page,
-}, info) => {
-  test.skip(info.project.name !== "oauth");
-  await connect(page);
-  await expect(
-    page.locator('.provider-card[data-selected="true"]'),
-  ).toContainText("Platform app");
-  await page
-    .getByRole("button", { name: "Sign in with MCP integration", exact: true })
-    .click();
-  await expect(
-    page.locator('.provider-card[data-selected="true"]'),
-  ).toContainText("Custom MCP integration");
-  await expect(page.getByText(/^Box connected/)).toContainText(
-    "MCP integration",
-  );
-  await choose(page, `mcp-${Date.now()}.bin`, Buffer.alloc(2048));
   await expect(page.locator(".transfer-status").last()).toContainText(
-    "Saved to Box · Direct",
+    "non-empty",
   );
-  const trace = page.getByRole("region", { name: /Request trace/ });
-  await expect(trace).toContainText("MCP integration");
-  await expect(trace).toContainText("Downscope · base_upload");
-  await expect(trace).toContainText("Browser → Box API");
-  await expect(trace).not.toContainText("mcp-secret");
-  await page
-    .getByRole("button", { name: "Sign in with platform app", exact: true })
-    .click();
-  await expect(
-    page.locator('.provider-card[data-selected="true"]'),
-  ).toContainText("Platform app");
-  await expect(trace).toContainText("MCP integration");
-  await expect(trace).toContainText("Token revocation");
+  const overflow = await page.evaluate(() => ({
+    width: innerWidth,
+    actual: document.documentElement.scrollWidth,
+    elements: [...document.querySelectorAll("body *")]
+      .filter((el) => el.getBoundingClientRect().right > innerWidth)
+      .slice(0, 12)
+      .map((el) => el.tagName + "." + el.className),
+  }));
+  expect(overflow.actual, JSON.stringify(overflow)).toBeLessThanOrEqual(
+    overflow.width,
+  );
 });
 
-test("disabling fallback stops on a browser network failure", async ({
+test("platform flow selection is explicit and releases the previous platform credential", async ({
   page,
 }) => {
+  test.skip(test.info().project.name === "mcp");
   await connect(page);
-  await page.getByLabel("Allow server fallback").uncheck();
-  await page.route("http://127.0.0.1:3130/**", (route) =>
-    route.abort("blockedbyclient"),
-  );
+  const next = test.info().project.name === "ccg" ? "oauth" : "ccg";
+  await platformConnect(page, next);
+  const session = await (
+    await page.context().request.get("/api/auth/session")
+  ).json();
+  expect(session.primaryApp).toBe(next === "oauth" ? "platform" : "ccg");
+  expect(
+    session.apps.filter((app: { connected: boolean }) => app.connected),
+  ).toHaveLength(1);
+  await choose(page, `${unique("switched")}.bin`, Buffer.alloc(100));
+  await saved(page);
+});
+
+test("MCP and Platform OAuth retry in the same account and list the saved file", async ({
+  page,
+}) => {
+  test.skip(test.info().project.name !== "mcp");
+  await connect(page);
+  await platformConnect(page, "oauth");
+  await expect(page.locator(".fallback-state")).toContainText("Retry order");
+  const session = await (
+    await page.context().request.get("/api/auth/session")
+  ).json();
+  expect(session).toMatchObject({
+    primaryApp: "mcp",
+    fallbackApp: "platform",
+    fallbackArmed: true,
+  });
+  let attempts = 0;
   let stages = 0;
   page.on("request", (req) => {
     if (req.url().endsWith("/api/uploads")) stages++;
   });
-  await choose(page, `direct-only-${Date.now()}.bin`, Buffer.alloc(2048));
-  await expect(page.locator(".transfer-status").last()).toContainText(
-    "could not reach Box",
+  await page.route(`${simulator}/api/2.0/**`, (route) =>
+    ++attempts === 1
+      ? route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: "{}",
+        })
+      : route.continue(),
   );
+  const name = `${unique("credential-retry")}.bin`;
+  await choose(page, name, Buffer.from("same destination"));
+  await saved(page);
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "browser · Platform OAuth",
+  );
+  await expect(page.getByRole("link", { name, exact: true })).toBeVisible();
   expect(stages).toBe(0);
-  await expect(
-    page.getByRole("region", { name: /Request trace/ }),
-  ).toContainText("CORS / blocked");
 });
 
-test("platform selector switches CCG and OAuth with one active session", async ({
+test("cross-account fallback stays available and labels the saved destination", async ({
+  page,
+}) => {
+  test.skip(test.info().project.name !== "mcp");
+  await connect(page);
+  await platformConnect(page, "ccg");
+  await expect(page.locator(".fallback-state")).toContainText("Retry order");
+  let attempts = 0;
+  await page.route(`${simulator}/api/2.0/**`, (route) =>
+    ++attempts === 1
+      ? route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: "{}",
+        })
+      : route.continue(),
+  );
+  await choose(
+    page,
+    `${unique("cross-account")}.bin`,
+    Buffer.from("test harness"),
+  );
+  await saved(page);
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "Platform CCG · ccg (ccg) · root 0",
+  );
+  await expect(
+    page.getByRole("link", { name: "Open saved file", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Listing the primary account/)).toBeVisible();
+});
+
+test("hosted MCP text, UTF-16 binary preservation, pagination and versions", async ({
   page,
   request,
-  baseURL,
 }) => {
+  test.skip(test.info().project.name !== "mcp");
   await connect(page);
-  await page.getByLabel("Platform auth flow").selectOption("ccg");
-  if (
-    await page
-      .getByRole("button", { name: "Connect Platform CCG", exact: true })
-      .isVisible()
-  ) {
-    const password = page.getByLabel("Access password");
-    if (await password.isVisible())
-      await password.fill("test-workspace-password");
-    await page
-      .getByRole("button", { name: "Connect Platform CCG", exact: true })
-      .click();
+  await page.getByLabel("Destination folder").fill(unique("hosted"));
+  const inputs = [
+    ["one.txt", Buffer.from("first")],
+    ["two.txt", Buffer.from("second")],
+    ["bom.txt", Buffer.from([0xef, 0xbb, 0xbf, 0x61])],
+    ["utf16.txt", Buffer.from([0xff, 0xfe, 0x41, 0])],
+  ] as const;
+  for (const [name, bytes] of [...inputs, inputs[3]]) {
+    await choose(page, name, bytes);
+    await saved(page);
+    await expect(page.getByRole("link", { name, exact: true })).toBeVisible();
   }
-  await expect(page.getByText(/^Box connected/)).toContainText("Platform CCG");
-  const previousCookie = (await page.context().cookies()).find(
-    (cookie) => cookie.name === "box_session",
-  )!;
-  await page.getByLabel("Platform auth flow").selectOption("platform");
-  await expect(page.getByText(/^Box connected/)).toContainText("Platform CCG");
-  await page
-    .getByRole("button", { name: "Sign in with platform app", exact: true })
-    .click();
-  await expect(page.getByText(/^Box connected/)).toContainText(
-    "Platform OAuth",
+  await expect(page.locator(".transfer-status").last()).toContainText(
+    "New version",
   );
-  const status = await (
+  await expect(page.locator(".file-list li")).toHaveCount(4);
+  const session = await (
     await page.context().request.get("/api/auth/session")
   ).json();
-  expect(status).toMatchObject({
-    mode: "oauth",
-    app: "platform",
-    connected: true,
-  });
-  expect(
-    (
-      await request.get(`${baseURL}/api/files`, {
-        headers: { Cookie: `box_session=${previousCookie.value}` },
-      })
-    ).status(),
-  ).toBe(401);
-  await choose(page, `after-switch-${Date.now()}.bin`, Buffer.alloc(2048));
-  await expect(page.locator(".transfer-status").last()).toContainText(
-    "Saved to Box · Direct",
-  );
+  const owner = session.apps.find((a: { app: string }) => a.app === "mcp")
+    .identity.id;
+  const metrics = await (await request.get(`${simulator}/metrics`)).json();
+  for (const [name, bytes] of inputs)
+    expect(
+      metrics.files.find(
+        (f: { name: string; owner: string }) =>
+          f.name === name && f.owner === owner,
+      ),
+    ).toMatchObject({
+      size: bytes.length,
+      sha1: createHash("sha1").update(bytes).digest("hex"),
+    });
+  expect(metrics.hostedCalls).toContain("upload_file");
+  expect(metrics.hostedCalls).toContain("get_upload_url");
 });
