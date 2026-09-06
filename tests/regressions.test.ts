@@ -223,3 +223,31 @@ test("a failed abort cannot be mistaken for a retryable credential refusal", asy
     globalThis.fetch = original;
   }
 });
+
+test("a successful POST with an unreadable or missing file receipt is uncertain", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const body of ['{"entries":', "null", '{"entries":[]}']) {
+      let posts = 0;
+      globalThis.fetch = async (url) => {
+        if (url === "/api/direct")
+          return Response.json({
+            strategy: "simple",
+            token: "ticket",
+            name: "x.bin",
+            folderId: "0",
+            uploadUrl: "https://upload.box.com/content",
+          });
+        posts++;
+        return new Response(body, { status: 201 });
+      };
+      await assert.rejects(
+        directUpload(new File(["test"], "x.bin"), "", () => {}),
+        DirectUncertainError,
+      );
+      assert.equal(posts, 1);
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});

@@ -264,11 +264,10 @@ export async function directUpload(
     }
     if (response.status >= 500) throw new DirectUncertainError();
     await check(response);
-    const result = await response.json();
-    if (!result.entries?.[0]?.id)
-      throw new Error(
-        "Box did not confirm the file. Refresh the folder before trying again.",
-      );
+    const result = await response.json().catch(() => {
+      throw new DirectUncertainError();
+    });
+    if (!result?.entries?.[0]?.id) throw new DirectUncertainError();
     return {
       id: result.entries[0].id,
       newVersion: prepared.newVersion ?? false,

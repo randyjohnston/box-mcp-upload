@@ -1,113 +1,103 @@
-# Architecture
+# Architecture and upload limits
 
-This harness compares three Box authentication paths — the Box MCP integration,
-a platform OAuth app, and a platform CCG service account — and records every
-request each one makes. The diagram in
-[`diagrams/architecture.html`](diagrams/architecture.html) shows the components
-and their connections. This document explains the trust boundary, the upload
-paths, and how the harder facts below were verified.
+The Next.js server holds Box credentials and prepares uploads. The browser normally sends file bytes directly to Box. Server uploads first save a temporary file on the computer running Next.js.
 
-![Box upload architecture](diagrams/architecture.png)
+<p align="center">
+  <img src="diagrams/architecture.png" alt="Box upload components and fallback workflow" width="100%">
+</p>
 
-The interactive version — theme toggle, zoom, path tracing — is
-[`diagrams/architecture.html`](diagrams/architecture.html).
+Download and open [the interactive diagram](diagrams/architecture.html) for zoom, theme selection, and path tracing. Its source is [architecture.json](diagrams/architecture.json); the [delivery receipt](diagrams/architecture.receipt.json) records validation and file hashes.
 
-## Components
+## Components and credentials
 
-| Component | Role |
-| --- | --- |
-| Browser workbench | The page a person uses. It never holds a full Box credential. |
-| Next.js API | This app's server. It holds the Box client secrets and every full token. |
-| App MCP tools | Tool functions that run inside the Next.js process. They call Box for the platform OAuth and CCG credentials. |
-| Box-hosted MCP | Box's own MCP server at `mcp.box.com`. Used only for the MCP integration credential. |
-| Box Platform API | Box's REST API, used by the platform OAuth and CCG paths. |
-| Box upload hosts | `upload.box.com` and `upload.app.box.com`, which receive the file bytes. |
-| Temporary upload files | Browser bytes saved on the server only when a server upload is needed, then deleted. |
-| Session and OAuth state | In-memory session, OAuth state, and single-use upload records. |
+| Component               | Responsibility                                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Browser workbench       | Queue files, hash parts, upload bytes, and display request traces.                                                                                     |
+| Next.js API             | Check the request origin and session, receive temporary files, and call the app's MCP tools.                                                           |
+| App MCP tools           | Functions connected by the MCP SDK inside the Next.js process. Dispatch to Box-hosted MCP or Platform REST.                                            |
+| Session and OAuth state | Hold client credentials, access/refresh tokens, OAuth state, and PKCE data in server memory.                                                           |
+| Box-hosted MCP          | Folder lookup, inline text uploads, and upload tickets for the MCP registration.                                                                       |
+| Box Platform API        | Folder lookup, token downscoping, and upload-session control for Platform OAuth and CCG. Also resolves identity during sign-in for every registration. |
+| Box upload hosts        | Receive file bytes using a scoped token or MCP upload ticket.                                                                                          |
+| Temporary upload files  | Store bytes for a server upload attempt, then delete them.                                                                                             |
 
-## Trust boundary
+Full tokens and client secrets stay on the Next.js server. The browser receives a folder-restricted `base_upload` token for Platform uploads, or the URL and upload token returned by hosted `get_upload_url`. The server validates the upload host and rejects missing tokens or a token equal to its full credential.
 
-The client secret and every full or refresh token stay on the Next.js server.
-The browser receives only a folder-restricted `base_upload` token or a single-use
-upload ticket, and only when it is about to send bytes. A separate section of the
-README, "Fallback and uncertain results," covers what the server still does when
-browser uploads are turned off.
+MCP and one Platform credential can connect together. MCP takes priority; Platform OAuth and CCG are mutually exclusive. The configured default is the first available of MCP, Platform OAuth, then CCG. Cross-account fallback is allowed, so the transfer result names the account and root actually used.
 
-## Upload paths
+## Upload routes
 
-The credential in use selects the path. The [README upload-routes table](../README.md#upload-routes)
-lists each path's preparation, byte transfer, and finalization; the
-[file-size-limits table](../README.md#file-size-limits) lists the limits. In
-short:
+- **MCP inline text:** for a supported extension up to 256 KiB, the server saves the file, checks lossless UTF-8 decoding, then calls `upload_file` or `upload_file_version`. Invalid UTF-8 uses a hosted upload ticket from the server instead. Byte-order marks are preserved.
+- **MCP binary:** `get_upload_url` prepares one `multipart/form-data` POST. The browser sends the entire file to that URL. Here, “multipart” means one HTTP body containing metadata and file content; it does not mean independently uploaded chunks.
+- **Platform simple:** below 20 MiB, the server resolves the folder, obtains a folder-restricted token, and checks for a name conflict. The browser POSTs a new file or version.
+- **Platform chunked:** at 20 MiB or above, the server creates an upload session. The browser uses the returned `part_size`, hashes with SHA-1, and sends parts with three workers. The server lists parts, verifies coverage, and commits with the whole-file digest. Part size is not fixed at 8 MiB.
+- **Server upload:** after saving a temporary file, the app calls the same MCP or Platform implementation with the selected credential and streams progress to the browser. Platform chunked uploads read one part at a time; Platform simple and MCP binary uploads read the entire temporary file into memory.
 
-- **MCP integration** — all work uses Box's published MCP tools. Small UTF-8
-  text goes up inline with `upload_file` or `upload_file_version`. Every other
-  file uses `get_upload_url`, then one POST of the bytes. No Box REST call is
-  made on this path.
-- **Platform OAuth and CCG** — the Box REST API. Files below 20 MiB use a
-  single POST to `/files/content`; files at or above 20 MiB use a chunked
-  upload session with 8 MiB parts.
+Matching file names add versions. Folder lookup resolves only immediate children of the configured root. Hosted listing follows the returned pagination metadata and reports an error on repeated or incomplete pages. The simulator tests offset pagination; verify the live tool's accepted arguments using **Inspect hosted MCP**.
 
-## What "multipart" means on the MCP path
+Inline extensions: `txt`, `md`, `boxnote`, `html`, `svg`, `xml`, `csv`, `json`, `js`, `ts`, `py`, `sh`.
 
-Box's blog and sequence diagram describe the `get_upload_url` transfer as a
-"multipart upload over HTTP." This is the `multipart/form-data` encoding of one
-HTTP request — the same encoding a browser form uses — not a chunked or
-resumable upload. It sends the whole file in a single POST.
+## Fallback workflow
 
-This was verified against Box's live MCP server, not inferred:
+1. Try the primary credential, then the second connected credential after an explicit 401/403 refusal or a network failure during a chunked upload whose session was successfully aborted.
+2. Skip that credential for later files in the tab until **Retry browser upload** or reconnection.
+3. If no eligible browser route succeeds, use a server upload when **Let the Next.js server carry file bytes** is enabled. The server uses the primary credential, except that a primary refusal in this attempt selects the connected fallback credential. This setting also controls MCP inline text.
+4. Stop on an uncertain POST result, failed commit, failed abort, or other HTTP error. A write may have succeeded even when its response was lost. Inspect Box before uploading the file again.
 
-- Calling `get_upload_url` for a 1 KB file and for a 100 MB file both returned a
-  URL on the **simple-upload** endpoint,
-  `https://upload.app.box.com/api/2.0/files/content`, with a bound
-  `upload_token`. The URL shape did not change with size.
-- The URL carries an `upload_session_id` query parameter. This is a proxy-token
-  binding on the simple-upload endpoint, not the chunked resource
-  (`/files/upload_sessions/{id}`). Box's MCP server publishes no part, commit,
-  session, or abort tool.
+A browser cannot distinguish a rejected CORS preflight from a connection lost after a successful POST. Automatic fallback therefore cannot safely follow an opaque simple-upload error. Chunk uploads must abort successfully before a retry can use another credential.
 
-Consequences for large files on the MCP path: there is no per-part retry and no
-resume, and the returned URL and token expire about 10 minutes after they are
-issued. A slow transfer that outlives the token fails as a whole. Box benchmarked
-this path only up to 20 MB in its blog; Box does not publish a maximum file size
-for `get_upload_url`, and this harness did not complete a transfer above the
-documented 50 MB simple-upload limit to test whether the proxy raises it.
+## File size limits
 
-Two conditions gate the MCP binary path regardless of file size:
+Sources checked on **2026-09-06**. KiB and MiB use powers of 1024; Box's MB and GB labels are reproduced as published.
 
-- `get_upload_url` and `get_download_url` are off by default on the Box MCP
-  server. An enterprise admin enables them under Admin Console → Integrations →
-  Box MCP Server → Files and Folders → Custom Configuration.
-- Some clients require allowlisting the upload hosts `upload.*.box.com`,
-  `*.boxcloud.com`, and `*.box.com`.
+| Route             | Harness setting                                                                                           | Published Box constraint                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| All web uploads   | Non-empty files, at most `MAX_UPLOAD_BYTES`; default 512 MiB.                                             | Account maximum also applies. Check **Account Settings → Account Details → Max File Size**.                                                                |
+| MCP inline text   | Supported extension, at most 256 KiB, lossless UTF-8.                                                     | The cited MCP documentation publishes no numeric payload limit for `upload_file` or `upload_file_version`.                                                 |
+| MCP binary ticket | One POST; no part retries or resume.                                                                      | No numeric maximum is published for `get_upload_url` in the cited documentation. Ticket creation alone does not prove a file of that size can be uploaded. |
+| Platform simple   | Selected below 20 MiB.                                                                                    | Box recommends chunked upload above 50 MB; this is a recommendation, not a documented 50 MB hard cap.                                                      |
+| Platform chunked  | Selected at 20 MiB (20,971,520 bytes). Uses Box's part size; rejects invalid sizes or parts above 64 MiB. | Minimum file size is 20 MB. Box documents a seven-day session lifetime; the harness retains its browser-upload record for only 15 minutes.                 |
 
-## Cross-origin behavior
+Box lists account maxima from 250 MB for Free Personal to 500 GB for Enterprise Advanced. The configured harness maximum is separate and is not automatically adjusted to the account. See [direct uploads](https://developer.box.com/guides/uploads/direct), [upload API](https://developer.box.com/reference/post-files-content), and [chunked uploads](https://developer.box.com/guides/uploads/chunked).
 
-CORS enforcement differs by Box endpoint, which affects browser uploads:
+Box's [binary-over-MCP article](https://blog.box.com/upload-and-download-binary-mcp-how-box-solved-last-mile-agentic-file-editing) compares passing base64 through a model with transferring bytes through a temporary URL. Its benchmark failures are not MCP tool size limits. This harness sends text programmatically and never passes file contents through a model.
 
-- `POST /files/content` (simple upload) enforces the app's CORS Domains
-  allow-list and returns `403 cors_origin_not_whitelisted` for an unlisted
-  origin.
-- The upload-session endpoints (`/files/upload_sessions`, and the part PUTs on
-  `upload.app.box.com`) return `201`/`200` from an unlisted origin and reflect
-  that origin with `Access-Control-Allow-Credentials: true`.
+### MCP tool access and evidence limits
 
-Because Box selects the upload host and endpoint by file size, a file below
-20 MiB can be refused from the browser while a larger file to the same folder
-with the same credential succeeds. When a browser upload is refused, the harness
-retries with the other connected credential, then falls back to a server upload
-if that is allowed.
+Box's [published tools](https://developer.box.com/guides/box-mcp/tools) lists `get_upload_url` and `upload_file_version` as off by default; an enterprise admin must enable the tools needed for the test. Network filtering may also require Box's upload domains to be allowed. This is separate from an app's browser CORS configuration.
 
-## How key facts were verified
+Earlier manual testing recorded `get_upload_url` responses for declared sizes of 1 KB and 100 MB. Both targeted `upload.app.box.com/api/2.0/files/content` with an upload token. That shows the same endpoint shape, not successful transfer at those sizes. No retained test establishes the maximum MCP file size. An `upload_session_id` query parameter on this URL is not evidence of the Platform chunked-upload protocol.
 
-The behaviors above were confirmed empirically, holding the credential, folder,
-and origin constant and changing one variable at a time:
+Earlier notes reported ticket expiry of about ten minutes. The cited public pages promise short-lived, single-use URLs without a numeric lifetime, so ten minutes remains an observation to recheck in the live tool description. Expiry alone does not establish whether Box terminates a transfer already in progress.
 
-- **MCP transport** — connected to `mcp.box.com` and called each tool; recorded
-  the returned URLs and payload shapes.
-- **CORS per endpoint** — sent the same downscoped token to `/files/content`,
-  `/files/upload_sessions`, and a part PUT, from a listed origin and an unlisted
-  origin, and compared status codes and response headers.
-- **Upload-size routing** — read the harness thresholds from source
-  (`CHUNKED_THRESHOLD` = 20 MiB, `TEXT_INLINE_LIMIT` = 256 KiB) and confirmed
-  20 MiB is above Box's 20 MB session minimum.
+Earlier testing also reported different CORS behavior between simple and chunked endpoints. Treat this as registration-specific evidence, not a guarantee that chunked uploads bypass CORS. Configure the origin for every app and use the request trace to compare failures.
+
+## Timeouts and capacity
+
+| Setting                                    | Current value and scope                                                                                                                         |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browser request to Box                     | 60 seconds per request, including an entire simple upload.                                                                                      |
+| Server Box REST or hosted MCP HTTP request | 60 seconds per attempt.                                                                                                                         |
+| MCP binary POST from the server            | 15 minutes.                                                                                                                                     |
+| App MCP tool call / browser commit request | 15 minutes / 16 minutes.                                                                                                                        |
+| Browser transfer to temporary storage      | 10 minutes.                                                                                                                                     |
+| Session / pending OAuth state              | 8 hours / 10 minutes. Restarting Next.js clears both.                                                                                           |
+| Pending browser chunk sessions             | 15 minutes; at most 5 per owner and 1,000 per process.                                                                                          |
+| Browser queue / displayed trace            | At most 20 pending files / 120 rows in the tab's session storage.                                                                               |
+| Temporary storage                          | At most 3 concurrent incoming uploads. Admission stops at 100 existing files or 2 GiB already stored; in-flight writes can exceed those totals. |
+| Abandoned temporary files                  | Expire after 6 hours; cleanup runs when another file arrives. Claimed uploads delete their files after the attempt.                             |
+
+Chunk workers retry 429/5xx responses up to three times, with delays capped at 30 seconds. Server REST retries eligible reads, part PUTs, and deletes; it does not replay a POST after a network failure or 5xx. A commit returning 202 is polled up to ten times. These are harness policies, not Box service limits.
+
+## Source layout
+
+| Directory                         | Contents                                                     |
+| --------------------------------- | ------------------------------------------------------------ |
+| `src/auth/`, `src/box/`           | Sessions, grants, Platform REST, folders, and uploads.       |
+| `src/mcp/`                        | App MCP tools, Box-hosted MCP client, and stdio entry point. |
+| `src/app/api/`, `src/components/` | HTTP routes and browser workbench.                           |
+| `tests/`                          | Unit regressions, Box simulator, and browser tests.          |
+
+`npm run mcp` starts this project's stdio server with CCG. It has no byte-receiving tool: an external caller must first save a temporary file on the computer running that server and pass its upload ID. `scripts/e2e.ts` does this for `npm run e2e:live`, which writes real Box files under `e2e/`. This tests the project's MCP wrapper, not the Box-hosted MCP service.
+
+The web app creates an MCP SDK client/server pair for each request. This wrapper, the standalone runner, and other optional features are listed in [simplification candidates](simplification-candidates.md). They have not been removed.

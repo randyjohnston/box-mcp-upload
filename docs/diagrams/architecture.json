@@ -6,7 +6,7 @@
     "locale": "en",
     "quality_profile": "showcase",
     "viewBox": [
-      1360,
+      1140,
       720
     ]
   },
@@ -15,28 +15,28 @@
       "id": "browser",
       "type": "frontend",
       "label": "Browser workbench",
-      "sublabel": "Queue \u00b7 hashes \u00b7 request trace",
+      "sublabel": "Queue, hashes, request trace",
       "pos": [
-        40,
+        50,
         300
       ],
       "size": [
         240,
-        80
+        58
       ]
     },
     {
       "id": "api",
       "type": "backend",
       "label": "Next.js API",
-      "sublabel": "Origin checks \u00b7 session ownership",
+      "sublabel": "Origin checks, session ownership",
       "pos": [
-        420,
+        430,
         300
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
@@ -45,26 +45,26 @@
       "label": "App MCP tools",
       "sublabel": "Run in the Next.js process",
       "pos": [
-        830,
+        840,
         300
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
       "id": "sessions",
       "type": "security",
       "label": "Session + OAuth state",
-      "sublabel": "PKCE \u00b7 token renewal \u00b7 app credentials",
+      "sublabel": "PKCE, token renewal, app credentials",
       "pos": [
-        420,
+        430,
         70
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
@@ -73,68 +73,68 @@
       "label": "Box OAuth",
       "sublabel": "MCP / Platform OAuth / CCG",
       "pos": [
-        830,
+        840,
         70
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
       "id": "staging",
       "type": "database",
       "label": "Temporary upload files",
-      "sublabel": "On this server \u00b7 deleted after upload",
+      "sublabel": "On this server, deleted after upload",
       "pos": [
-        30,
+        40,
         560
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
       "id": "platform",
       "type": "external",
       "label": "Box Platform API",
-      "sublabel": "Folders \u00b7 scoped token \u00b7 chunk commit",
+      "sublabel": "Folders, scoped token, chunk commit",
       "pos": [
-        830,
+        840,
         560
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
       "id": "hosted",
       "type": "external",
       "label": "Box-hosted MCP",
-      "sublabel": "Inline text / validated upload ticket",
+      "sublabel": "Inline text / validated upload URL",
       "pos": [
-        420,
+        430,
         560
       ],
       "size": [
         260,
-        80
+        58
       ]
     },
     {
       "id": "upload-host",
       "type": "external",
       "label": "Box upload hosts",
-      "sublabel": "Scoped token / upload ticket only",
+      "sublabel": "Scoped token / upload URL only",
       "pos": [
-        40,
+        50,
         70
       ],
       "size": [
         240,
-        80
+        58
       ]
     }
   ],
@@ -143,7 +143,7 @@
       "id": "control",
       "from": "browser",
       "to": "api",
-      "label": "HTTPS control",
+      "label": "HTTP control",
       "variant": "emphasis"
     },
     {
@@ -174,7 +174,7 @@
       "variant": "dashed",
       "fromSide": "bottom",
       "toSide": "top",
-      "labelDy": 110
+      "labelDy": 80
     },
     {
       "id": "hosted-call",
@@ -204,15 +204,15 @@
       "dot": "cyan",
       "title": "Direct bytes",
       "items": [
-        "Browser \u2192 Box upload host with a scoped token or upload ticket.",
-        "Platform: simple below 20 MiB; chunked above, three workers."
+        "Browser \u2192 Box upload host with a scoped token or upload URL.",
+        "Platform: simple below 20 MiB; chunked at or above, three workers."
       ]
     },
     {
       "dot": "amber",
       "title": "Fallback workflow",
       "items": [
-        "401/403 or safely aborted chunks \u2192 next connected credential; account/root may change.",
+        "401/403 or chunk network failure after abort \u2192 next credential; account/root may change.",
         "No browser route \u2192 server if enabled. Uncertain writes or failed aborts \u2192 stop."
       ]
     },

@@ -5,7 +5,7 @@ The current app needs changes before multi-instance hosting. Do not deploy it un
 ## Target design
 
 - Vercel hosts Next.js, OAuth callbacks, session validation, and upload control requests.
-- Keep browser-to-Box uploads as the default. Only verified folder-restricted `base_upload` tokens or validated hosted MCP upload tickets reach the browser.
+- Keep browser-to-Box uploads as the default. Only verified folder-restricted `base_upload` tokens or validated hosted MCP upload URLs reach the browser.
 - Replace in-memory sessions, OAuth state, and direct-upload records with a shared database. Encrypt stored Box tokens; use transactions/locks for single-use state, refresh-token rotation, and commit ownership. Add expiry cleanup.
 - Replace temporary files on the Next.js server with access-controlled object storage and an upload worker. For browser-blocked Box traffic, send small chunks to the application origin, reassemble in storage, and queue the MCP-backed Box transfer. Return a job ID and poll progress; a repeated retry must not create a second file.
 - Package the shared MCP tools in the worker or run an authenticated remote MCP service. Do not spawn `npx`/stdio child processes from Vercel functions.

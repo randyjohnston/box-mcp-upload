@@ -112,9 +112,9 @@ export default function AuthWorkbench({
       <ol className="policy-rules">
         <li>The browser uploads to Box, using the MCP integration first.</li>
         <li>
-          If Box refuses that credential (<code>401</code>/<code>403</code>), or
-          the browser cannot reach Box, the browser retries with the next
-          connected credential.
+          After a <code>401</code>/<code>403</code> refusal, or a network
+          failure in a chunked upload whose session was aborted, try the next
+          connected credential. Uncertain writes stop for inspection.
         </li>
         <li>
           If no credential works from the browser, the Next.js server uploads

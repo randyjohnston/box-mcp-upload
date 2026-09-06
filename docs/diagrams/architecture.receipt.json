@@ -6,12 +6,12 @@
   "input": "/Users/randy/Code/box-mcp-upload/docs/diagrams/architecture.json",
   "output": "/Users/randy/Code/box-mcp-upload/docs/diagrams/architecture.html",
   "specification": {
-    "sha256": "7f04e21fa5ec3f888a256fba2137dbf01150f82c9442634d8daf3cf3cc1c0c3d",
-    "bytes": 4053
+    "sha256": "54538f4b0e29ce408ec9986468bdb0609707713bd33bebf8302607c37b8ac78b",
+    "bytes": 4521
   },
   "artifact": {
-    "sha256": "ccaa315d990b50f74b49cc316d1211db4d675fff20bfdba3052432f22e40d200",
-    "bytes": 711694
+    "sha256": "d5720810f797700eabbc33ecb942cf539a05886ee4a69e12aa847ab028bde5e6",
+    "bytes": 713377
   },
   "validation": {
     "checksPassed": 9,

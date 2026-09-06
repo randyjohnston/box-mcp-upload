@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { BoxClient, BoxApiError, retryDelayMs, sleep } from "./client";
 import { assertSafeName, type BoxItem } from "./folders";
 
-/** Use chunked uploads from 20 MiB; Box also supports direct uploads up to 50 MB. */
+/** Harness threshold; Box recommends chunked uploads for files over 50 MB. */
 export const CHUNKED_THRESHOLD = 20 * 1024 * 1024;
 
 /** How many parts to send at once. Keeps memory bounded to POOL * part_size. */
