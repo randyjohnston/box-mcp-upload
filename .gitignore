@@ -1,0 +1,19 @@
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Secrets: .env holds Box credentials and must never be committed.
+.env
+.env*.local
+
+# Staged uploads (temporary files awaiting transfer to Box)
+.staging/
+
+# Browser test artifacts
+/test-results/
+/playwright-report/
+
+# Generated upload test corpus
+testfiles/

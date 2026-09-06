@@ -1,0 +1,9 @@
+.next
+node_modules
+.staging
+test-results
+playwright-report
+package-lock.json
+.env*
+AGENTS.md
+CLAUDE.md
